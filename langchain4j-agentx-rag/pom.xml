@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.agentx.ai</groupId>
+        <artifactId>langchain4j-agentx</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>langchain4j-agentx-rag</artifactId>
+    <name>LangChain4j AgentX RAG</name>
+    <description>基于 LangChain4j 的 RAG Harness 模块</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- LangChain4j AgentX Core (AgentTool 抽象，RagRetrievalTool 需要) -->
+        <dependency>
+            <groupId>com.agentx.ai</groupId>
+            <artifactId>langchain4j-agentx-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- LangChain4j 主包: ToolExecutor / DefaultToolExecutor -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+        </dependency>
+
+        <!-- LangChain4j core: Document / EmbeddingModel / EmbeddingStore / ChatModel -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>2.9.2</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parsers-standard-package</artifactId>
+            <version>2.9.2</version>
+        </dependency>
+
+        <!-- Spring JDBC (optional - for JdbcDocumentStore) -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Spring Data Redis (optional - for RedisDocumentStore) -->
+        <dependency>
+            <groupId>org.springframework.data</groupId>
+            <artifactId>spring-data-redis</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- LangChain4j Redis EmbeddingStore (optional; 无稳定版，钉 alpha) -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-redis</artifactId>
+            <version>1.0.0-alpha1</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- MinIO (optional - for MinioDocumentAssetStore) -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.1</version>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+
+</project>

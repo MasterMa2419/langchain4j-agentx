@@ -1,0 +1,171 @@
+package com.agentx.ai.core.context;
+
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.data.message.UserMessage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+
+/**
+ * Token 估算工具。
+ * <p>
+ * 区分中英文进行差异化估算：
+ * <ul>
+ *   <li>英文/ASCII 字符：约 4 字符 = 1 token</li>
+ *   <li>中文/CJK 字符：约 1.5 字符 = 1 token</li>
+ * </ul>
+ * 不依赖外部 token 计数库，保持框架轻量。
+ *
+ * @author bigchui
+ *
+ */
+public final class TokenEstimator {
+
+    private static final Logger log = LoggerFactory.getLogger(TokenEstimator.class);
+
+    /**
+     * 英文估算比率：约 4 字符 = 1 token
+     */
+    private static final double CHARS_PER_TOKEN_EN = 4.0;
+    /**
+     * 中文估算比率：约 1.5 字符 = 1 token
+     */
+    private static final double CHARS_PER_TOKEN_CJK = 1.5;
+
+    private TokenEstimator() {
+    }
+
+    /**
+     * 估算消息列表的总 token 数。
+     */
+    public static int estimateTokens(List<ChatMessage> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return 0;
+        }
+        int cjkCount = 0;
+        int nonCjkCount = 0;
+        for (ChatMessage msg : messages) {
+            int[] counts = countChars(msg);
+            cjkCount += counts[0];
+            nonCjkCount += counts[1];
+        }
+        int tokens = tokensFromCounts(cjkCount, nonCjkCount);
+        log.debug("Token estimation: cjkChars={}, nonCjkChars={}, estimatedTokens={}, messages={}",
+                cjkCount, nonCjkCount, tokens, messages.size());
+        return tokens;
+    }
+
+    /**
+     * 估算单条消息的 token 数（避免循环里装箱成 List）。
+     */
+    public static int estimateTokens(ChatMessage message) {
+        if (message == null) {
+            return 0;
+        }
+        int[] counts = countChars(message);
+        return tokensFromCounts(counts[0], counts[1]);
+    }
+
+    /**
+     * 估算纯文本的 token 数。
+     */
+    public static int estimateTokens(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int[] counts = count(text);
+        return tokensFromCounts(counts[0], counts[1]);
+    }
+
+    private static int tokensFromCounts(int cjkCount, int nonCjkCount) {
+        return (int) (cjkCount / CHARS_PER_TOKEN_CJK + nonCjkCount / CHARS_PER_TOKEN_EN);
+    }
+
+    /**
+     * 统计单条消息的中文字符数和非中文字符数。
+     *
+     * @param message 消息
+     * @return [cjkCount, nonCjkCount]
+     */
+    private static int[] countChars(ChatMessage message) {
+        int cjk = 0;
+        int nonCjk = 0;
+
+        if (message instanceof SystemMessage sm) {
+            int[] c = count(sm.text());
+            cjk += c[0];
+            nonCjk += c[1];
+        } else if (message instanceof UserMessage um) {
+            int[] c = count(um.singleText());
+            cjk += c[0];
+            nonCjk += c[1];
+        } else if (message instanceof AiMessage am) {
+            int[] c = count(am.text());
+            cjk += c[0];
+            nonCjk += c[1];
+            if (am.toolExecutionRequests() != null) {
+                for (var tc : am.toolExecutionRequests()) {
+                    int[] cn = count(tc.name());
+                    cjk += cn[0];
+                    nonCjk += cn[1];
+                    int[] ca = count(tc.arguments());
+                    cjk += ca[0];
+                    nonCjk += ca[1];
+                }
+            }
+        } else if (message instanceof ToolExecutionResultMessage trm) {
+            int[] c = count(trm.text());
+            cjk += c[0];
+            nonCjk += c[1];
+        } else {
+            int[] c = count(message.toString());
+            cjk += c[0];
+            nonCjk += c[1];
+        }
+
+        return new int[]{cjk, nonCjk};
+    }
+
+    /**
+     * 统计字符串中的中文字符数和非中文字符数。
+     * <p>
+     * CJK 统一汉字范围：\u4E00-\u9FFF（基本汉字）
+     * 扩展覆盖：\u3400-\u4DBF（扩展A）、\uF900-\uFAFF（兼容汉字）
+     *
+     * @param s 字符串
+     * @return [cjkCount, nonCjkCount]
+     */
+    private static int[] count(String s) {
+        if (s == null || s.isEmpty()) {
+            return new int[]{0, 0};
+        }
+        int cjk = 0;
+        int nonCjk = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (isCJK(s.charAt(i))) {
+                cjk++;
+            } else {
+                nonCjk++;
+            }
+        }
+        return new int[]{cjk, nonCjk};
+    }
+
+    /**
+     * 判断字符是否为 CJK（中日韩）字符。
+     */
+    private static boolean isCJK(char ch) {
+        return (ch >= '\u4E00' && ch <= '\u9FFF')   // 基本汉字
+                || (ch >= '\u3400' && ch <= '\u4DBF') // 扩展A
+                || (ch >= '\uF900' && ch <= '\uFAFF') // 兼容汉字
+                || (ch >= '\u2E80' && ch <= '\u2EFF') // CJK 部首补充
+                || (ch >= '\u3000' && ch <= '\u303F') // CJK 符号和标点
+                || (ch >= '\uFF00' && ch <= '\uFFEF') // 半角/全角字符
+                || (ch >= '\u3040' && ch <= '\u309F') // 平假名
+                || (ch >= '\u30A0' && ch <= '\u30FF');// 片假名
+    }
+}
