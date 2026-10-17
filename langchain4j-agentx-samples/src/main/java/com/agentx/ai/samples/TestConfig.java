@@ -1,5 +1,6 @@
 package com.agentx.ai.samples;
 
+import com.agentx.ai.core.agent.Agent;
 import com.agentx.ai.core.agent.ReactAgent;
 import com.agentx.ai.core.chatmodels.DeepSeekV4ChatModel;
 import com.agentx.ai.core.model.AgentStreamEvent;
@@ -222,7 +223,37 @@ public final class TestConfig {
     }
 
     /**
-     * 流式调用 Agent 并实时打印输出。
+     * 流式调用 Agent 并实时打印输出（兼容所有 Agent 实现：ReactAgent / ChatAgent）。
+     */
+    public static void streamAndPrint(Agent agent, String query) {
+        streamAndPrint(agent, query, null);
+    }
+
+    public static void streamAndPrint(Agent agent, String query, RunnableParams params) {
+        System.out.println("Q: " + query);
+        System.out.print("A: ");
+        if (params != null) {
+            agent.stream(query, params)
+                    .doOnNext(chunk -> {
+                        System.out.print(chunk);
+                        System.out.flush();
+                    })
+                    .doOnError(err -> System.err.println("\nError: " + err.getMessage()))
+                    .blockLast();
+        } else {
+            agent.stream(query)
+                    .doOnNext(chunk -> {
+                        System.out.print(chunk);
+                        System.out.flush();
+                    })
+                    .doOnError(err -> System.err.println("\nError: " + err.getMessage()))
+                    .blockLast();
+        }
+        System.out.println("\n");
+    }
+
+    /**
+     * 兼容旧调用：ReActAgent 专用签名。
      */
     public static void streamAndPrint(ReactAgent agent, String query) {
         streamAndPrint(agent, query, null);

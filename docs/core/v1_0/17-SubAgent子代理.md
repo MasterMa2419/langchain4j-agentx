@@ -12,7 +12,19 @@ SubAgent 不是特殊运行模式，而是被包装成一个普通工具注册�
 
 例如一个名为 `translator` 的子代理，会被父 Agent 看到成 `call_translator` 工具。
 
-主 Agent 的 LLM 根据描述决定是否委派，调用后由子代理完成自己的 ReAct 执行，再把结果返回给父 Agent。
+主 Agent 的 LLM 根据描述决定是否委派，调用后由子代理完成自己的执行，再把结果返回给父 Agent。
+
+子代理可以是任意 `Agent` 实现（`ReactAgent` 走 ReAct 多轮循环，`ChatAgent` 走单轮对话）：
+
+```java
+ReactAgent parent = ReactAgent.builder()
+        .models(models)
+        .subAgent(() -> ReactAgent.builder().name("analyst").description("数据分析").models(m1).build())
+        .subAgent(() -> ChatAgent.builder().name("translator").description("中英互译").models(m2).build())
+        .build();
+```
+
+委派时框架会先调用子代理的 `configureAsSubAgent(...)`，统一关闭其会话持久化并复用父 Agent 的 TraceStore（`ChatAgent` 不持有工具，天然满足第 6 节的约束）。
 
 ## 2. 调用链路长什么样
 
@@ -135,6 +147,11 @@ SubAgent 在存储上的口径要分开看：
 
 - 会影响父 Agent 的会话链路
 - 但子 Agent 自己不会额外落自己的 session
+
+### 单元测试：`SubAgentDelegationTest`
+
+覆盖两类子代理（`ReactAgent` / `ChatAgent`）的委派、`call_{name}` 工具注册、
+子代理会话关闭（SubAgent 模式）、流式 source 标签转发与 name 校验，无需真实模型。
 
 ## 10. 小结
 

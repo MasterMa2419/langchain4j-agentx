@@ -29,6 +29,7 @@ LangChain4j AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框
 | 能力 | 说明 |
 |------|------|
 | ReAct Agent 引擎 | 基于 Reasoning + Acting 驱动多轮执行闭环，统一处理 LLM 调用、工具调用与终态收敛 |
+| 普通 Chat Agent 引擎 | `ChatAgent` 单轮对话：一次 LLM 调用直接出答案，不注册工具 / 不走 ReAct 循环；复用会话记忆、流式输出、持久化与 Hook |
 | 同步与流式输出 | `call` / `stream` 双模式，流式基于 Reactor Flux，支持流式中途停止 |
 | 当前会话记忆 | `agentx_conversation` 记录每次调用边界；`agentx_session` 按 `original_messages`、`working_messages`、`offload_context` 三种状态键维护会话状态 |
 | 长期记忆 | 从 `original_messages` 异步抽取跨会话知识，写入外部 EmbeddingStore；每次调用前按 `userId` 语义检索注入 system prompt |
@@ -39,7 +40,7 @@ LangChain4j AgentX 是一款面向 Java 开发者的 AI Agent 开发框架。框
 | 任务管理与并发控制 | 会话级并发控制与中断机制，保障同一会话执行的有序性与可控性 |
 | Human-in-the-Loop | `askUser(true)` 默认注册内置 `ask_user` 工具与拦截；`interceptTools(...)` 支持审批类工具与输入类工具两种语义 |
 | 中断与恢复 | `agentx_pause_state` 持久化暂停快照，统一支持 `HITL_TOOL_REQUEST` 与 `USER_INTERRUPT` 两种暂停原因 |
-| SubAgent 子代理 | 子代理以 `call_{name}` 工具形式委派，拥有独立 context window；父 Agent 是 session 持久化边界 |
+| SubAgent 子代理 | ReactAgent 与 ChatAgent 均可注册为 `call_{name}` 工具被委派，子代理拥有独立 context window；父 Agent 是 session 持久化边界 |
 | TraceAudit 追踪审计 | `agentx_trace` 记录每轮 LLM 请求、响应、思考内容与 token 消耗 |
 | TodoWrite 任务追踪 | 结构化任务列表工具，支持流式 TodoProgress 事件 |
 | Skills 技能体系 | 按需加载技能内容，减少大段提示词常驻上下文 |
@@ -153,6 +154,40 @@ ReactAgent agent = ReactAgent.builder()
         .build();
 ```
 
+### 单轮对话场景：ChatAgent（普通 Agent）
+
+问答、客服、翻译、摘要等不需要工具循环的场景，可使用 `ChatAgent`——一次 LLM 调用直接出答案，不走 ReAct 多轮迭代：
+
+```java
+import com.agentx.ai.core.agent.ChatAgent;
+
+ChatAgent agent = ChatAgent.builder()
+        .models(models)                                   // 与 ReactAgent 相同的 AgentModels 注入方式
+        .dataSource(dataSource)                           // 传入后同一 conversationId 拥有会话记忆
+        .instructions("你是一个简洁友好的中文助手")          // 系统指令（system prompt）
+        .maxRetries(3)
+        .build();
+
+String answer = agent.call("你好");
+agent.stream("你好", params).subscribe(System.out::print);   // token 级流式
+```
+
+`ChatAgent` 与 `ReactAgent` 统一实现 `Agent` 接口（`call` / `stream` / `callForResult` / `streamForResult`），两类 Agent 可面向接口编程、混用在同一业务栈中。`ChatAgent` 复用同套基础设施：会话记忆（`agentx_session`）、调用边界（`agentx_conversation`）、Trace（`agentx_trace`）、思考模型适配与 Hook 生命周期。工具调用、HITL 中断恢复、上下文压缩属于 ReAct 引擎能力（作为父 Agent 委派子代理同样需要 `ReactAgent`），需要时请用 `ReactAgent`（详见 [21-普通对话Agent](docs/core/v1_0/21-普通对话Agent.md)）。
+
+`ChatAgent` 也可以反过来作为 **SubAgent** 被 `ReactAgent` 委派（注册为 `call_{name}` 工具）：
+
+```java
+ReactAgent parent = ReactAgent.builder()
+        .models(models)
+        .subAgent(() -> ChatAgent.builder()                     // 普通 Agent 也能被委派
+                .name("translator")
+                .description("中英互译助手")
+                .models(subModels)
+                .build())
+        .build();
+// 父 Agent 的 LLM 根据 description 决定是否调用 call_translator
+```
+
 ### 4. 数据持久化与开关
 
 传入 `DataSource` 后，框架会按需初始化会话表和追踪表。常用控制项如下：
@@ -205,6 +240,7 @@ ReactAgent agent = ReactAgent.builder()
 | 18 | 中断与恢复 | [18-中断与恢复](docs/core/v1_0/18-中断与恢复.md) |
 | 19 | Hook 机制 | [19-Hook机制](docs/core/v1_0/19-Hook机制.md) |
 | 20 | 沙箱隔离执行 | [20-沙箱隔离执行](docs/core/v1_0/20-沙箱隔离执行.md) |
+| 21 | 普通对话 Agent | [21-普通对话Agent](docs/core/v1_0/21-普通对话Agent.md) |
 
 推荐阅读顺序：05 → 10 → 12 → 18 → 17 → 19 → 20。
 
@@ -225,6 +261,7 @@ RAG 模块文档见 [docs/rag/README.md](docs/rag/README.md)。
 | `SubAgentSessionTest` | SubAgent 流式委派时，只有父 Agent 写 `agentx_session` |
 | `HookTest` | 7 种 Hook 事件的注册、参数改写、流式注入、异常捕获 |
 | `SandboxTest` / `DockerSandboxTest` | Local 与 Docker 两种沙箱模式的工具执行、快照恢复、隔离级别 |
+| `ChatAgentSessionTest` | 普通 ChatAgent 单轮对话、跨轮会话记忆、与 ReactAgent 同表的落库行为 |
 
 ## 规划中
 

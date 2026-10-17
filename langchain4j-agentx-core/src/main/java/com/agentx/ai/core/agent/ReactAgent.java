@@ -67,12 +67,15 @@ import java.util.function.Supplier;
  * 实现 Reasoning（推理）+ Acting（行动）循环模式，通过多轮对话完成复杂任务。
  * 支持自动多轮推理和工具调用、流式输出、会话记忆管理。
  * <p>
+ * 与 {@link ChatAgent}（普通单轮对话）统一实现 {@link Agent} 接口，
+ * 可按场景选择 Agent 类型并面向接口编程。
+ * <p>
  * 2.0 起 AI 层基于 LangChain4j：推荐通过 {@link com.agentx.ai.core.chatmodels.AgentModels}
  * 一次构造同步 + 流式模型对（{@code .models(...)}），框架直调 low-level API 并自行接管工具执行。
  *
  * @author bigchui
  */
-public class ReactAgent {
+public class ReactAgent implements Agent {
 
     private static final Logger log = LoggerFactory.getLogger(ReactAgent.class);
 
@@ -517,7 +520,8 @@ public class ReactAgent {
      * - 注入父 TraceStore：复用父 Agent 的 trace 审计（受父 enableTrace 控制，null 则不记录）<br>
      * - 长期记忆天然无：SubAgent 不持有 LongTermMemoryManager
      */
-    void configureAsSubAgent(TraceStore parentTraceStore) {
+    @Override
+    public void configureAsSubAgent(TraceStore parentTraceStore) {
         this.enableSession = false;
         this.traceStore = parentTraceStore;
     }
@@ -600,7 +604,7 @@ public class ReactAgent {
         private final List<AgentTool> pendingDeferredTools = new ArrayList<>();
         private boolean enableTrace = true;
         private PauseStateStore stateStore;
-        private final List<Supplier<ReactAgent>> subAgentProviders = new ArrayList<>();
+        private final List<Supplier<? extends Agent>> subAgentProviders = new ArrayList<>();
 
         public Builder name(String name) {
             this.name = name;
@@ -821,13 +825,14 @@ public class ReactAgent {
         }
 
         /**
-         * 注册子 Agent。
+         * 注册子 Agent（任意 {@link Agent} 实现：{@link ReactAgent} 或 {@link ChatAgent}）。
          * <p>
          * 子 Agent 会被包装为 {@code call_{name}} 工具，主 Agent 的 LLM 根据描述自动决定是否委派。
+         * 子代理在委派前会被框架切到 SubAgent 模式（关闭自身会话持久化、复用父 TraceStore）。
          *
          * @param agentProvider 子 Agent 工厂（每次调用创建新实例，保证线程安全）
          */
-        public Builder subAgent(Supplier<ReactAgent> agentProvider) {
+        public Builder subAgent(Supplier<? extends Agent> agentProvider) {
             this.subAgentProviders.add(agentProvider);
             return this;
         }
@@ -899,15 +904,15 @@ public class ReactAgent {
 
             // 处理 SubAgent：调一次 supplier 提取 name/description，注册为工具
             final TraceStore subAgentTraceStore = this.enableTrace ? traceStore : null;
-            for (Supplier<ReactAgent> provider : subAgentProviders) {
-                ReactAgent prototype = provider.get();
+            for (Supplier<? extends Agent> provider : subAgentProviders) {
+                Agent prototype = provider.get();
                 String agentName = prototype.getName();
                 String agentDesc = prototype.getDescription();
                 if (agentName == null || agentName.isBlank()) {
                     throw new IllegalArgumentException("SubAgent 必须设置 name");
                 }
-                Supplier<ReactAgent> wrappedProvider = () -> {
-                    ReactAgent agent = provider.get();
+                Supplier<Agent> wrappedProvider = () -> {
+                    Agent agent = provider.get();
                     agent.configureAsSubAgent(subAgentTraceStore);
                     return agent;
                 };

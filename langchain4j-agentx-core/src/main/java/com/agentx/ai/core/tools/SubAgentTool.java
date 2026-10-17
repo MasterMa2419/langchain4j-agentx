@@ -1,6 +1,6 @@
 package com.agentx.ai.core.tools;
 
-import com.agentx.ai.core.agent.ReactAgent;
+import com.agentx.ai.core.agent.Agent;
 import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.AgentStreamEvent;
 import com.agentx.ai.core.model.AgentTool;
@@ -19,12 +19,12 @@ import reactor.core.publisher.Sinks;
 import java.util.function.Supplier;
 
 /**
- * SubAgent 工具 — 将 ReactAgent 包装为 {@link AgentTool}。
+ * SubAgent 工具 — 将任意 {@link Agent}（ReactAgent / ChatAgent）包装为 {@link AgentTool}。
  *
  * <p>核心职责：
  * <ul>
  *   <li>接收主 Agent LLM 的委派请求</li>
- *   <li>通过 Supplier 创建独立的子 ReactAgent 实例</li>
+ *   <li>通过 Supplier 创建独立的子 Agent 实例</li>
  *   <li>透传 RunnableParams，保持调用上下文一致</li>
  *   <li>流式模式：子 Agent stream，事件打 source 标签转发到父 Sink</li>
  *   <li>非流式模式：子 Agent call，直接返回结果</li>
@@ -34,6 +34,7 @@ import java.util.function.Supplier;
  * <ul>
  *   <li>只能使用普通工具，禁止嵌套 SubAgentTool</li>
  *   <li>禁止使用 AskUserTool</li>
+ *   <li>ChatAgent 不持有工具，天然满足上述约束</li>
  * </ul>
  *
  * @author bigchui
@@ -52,7 +53,7 @@ public class SubAgentTool {
      * @return AgentTool
      */
     public static AgentTool create(String agentName, String description,
-                                   Supplier<ReactAgent> agentProvider) {
+                                   Supplier<? extends Agent> agentProvider) {
         String toolName = "call_" + agentName;
         String toolDescription = description + "。将任务委派给此子Agent处理，它将返回处理结果。";
 
@@ -89,9 +90,9 @@ public class SubAgentTool {
      * - sink 不为 null：流式模式，子 Agent 也流式执行，事件转发
      * - sink 为 null：非流式模式，子 Agent 也非流式执行
      */
-    private static String execute(String agentName, Supplier<ReactAgent> agentProvider,
+    private static String execute(String agentName, Supplier<? extends Agent> agentProvider,
                                    String message) {
-        ReactAgent subAgent = agentProvider.get();
+        Agent subAgent = agentProvider.get();
         assertAllowed(subAgent, agentName);
 
         Sinks.Many<AgentStreamEvent> parentSink = ContextHolder.getSink();
@@ -111,7 +112,7 @@ public class SubAgentTool {
     /**
      * 流式执行：子 Agent stream，事件打 source 标签转发到父 Sink。
      */
-    private static String executeStreaming(String agentName, ReactAgent subAgent, String message,
+    private static String executeStreaming(String agentName, Agent subAgent, String message,
                                             RunnableParams params, Sinks.Many<AgentStreamEvent> parentSink) {
         String subAgentId = "sa_" + IdWorker.getIdStr();
         SubAgentSource source = new SubAgentSource(agentName, subAgentId);
@@ -134,7 +135,7 @@ public class SubAgentTool {
     /**
      * 非流式执行：子 Agent call，直接返回结果。
      */
-    private static String executeBlocking(ReactAgent subAgent, String message,
+    private static String executeBlocking(Agent subAgent, String message,
                                            RunnableParams params) {
         log.debug("SubAgent blocking execution started");
 
@@ -144,6 +145,9 @@ public class SubAgentTool {
         }
         if (agentResult instanceof AgentResult.Failed f) {
             return "SubAgent 执行失败：" + f.error();
+        }
+        if (agentResult instanceof AgentResult.Paused) {
+            return "SubAgent 已暂停等待外部输入，委派场景无法继续（请关闭子代理的 HITL 拦截工具）";
         }
         return "SubAgent 执行异常：未知结果类型";
     }
@@ -167,7 +171,7 @@ public class SubAgentTool {
     /**
      * 合规检查：验证子 Agent 配置符合约束。
      */
-    private static void assertAllowed(ReactAgent agent, String agentName) {
+    private static void assertAllowed(Agent agent, String agentName) {
         for (AgentTool tool : agent.getTools()) {
             String toolDefName = tool.getToolDefinition().name();
             if (toolDefName.startsWith("call_")) {
