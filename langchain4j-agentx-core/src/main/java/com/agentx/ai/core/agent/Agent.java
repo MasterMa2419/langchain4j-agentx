@@ -16,8 +16,8 @@ import java.util.List;
  * <ul>
  *   <li>{@link ReactAgent} - ReAct 多轮循环 Agent：Reasoning + Acting 驱动，
  *       支持工具调用、HITL、中断恢复、上下文压缩、SubAgent 等完整能力，适合复杂任务</li>
- *   <li>{@link ChatAgent} - 单轮对话 Agent：一次 LLM 调用直接出答案，
- *       复用会话记忆 / 流式输出 / 持久化 / Hook，适合问答、客服等不需要工具循环的场景</li>
+ *   <li>{@link ChatAgent} - 单轮对话 Agent：一次 LLM 调用直接出答案（可注册基础工具，
+ *       有界轮次），复用会话记忆 / 流式输出 / 持久化 / Hook，适合问答、客服等浅层场景</li>
  * </ul>
  * <p>
  * 业务代码、RAG 工具、前端展示层等面向本接口编程，即可在同一栈内同时驱动两种 Agent。
@@ -91,7 +91,7 @@ public interface Agent {
     /**
      * 本 Agent 的能力清单（工具定义）。
      * <p>用于 SubAgent 委派前的合规校验（禁止嵌套 SubAgent / AskUser）与运行时内省。
-     * 不支持工具的 Agent 实现（如 {@link ChatAgent}）返回空列表。
+     * 未注册工具的实现返回空列表。
      */
     List<AgentTool> getTools();
 

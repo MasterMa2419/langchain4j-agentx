@@ -5,16 +5,21 @@ import com.agentx.ai.core.hook.AgentHook;
 import com.agentx.ai.core.hook.HookEvent;
 import com.agentx.ai.core.model.AgentResult;
 import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.model.AgentTool;
 import com.agentx.ai.core.model.RunnableParams;
 import com.agentx.ai.core.memory.store.SessionMessageStore;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.service.tool.ToolExecutor;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -33,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>同步 / 流式 / callForResult / streamForResult 四种入口返回一致</li>
  *   <li>会话记忆：同一 conversationId 跨调用加载历史（内存会话存储）</li>
  *   <li>Hook 生命周期：Before/After/Reasoning/AfterCall 事件按序触发</li>
+ *   <li>基础工具调用：有界工具轮次（默认 1，可配），工具执行后回填并收敛最终答案</li>
  *   <li>{@link Agent} 统一接口多态可用</li>
  * </ul>
  */
@@ -93,9 +99,98 @@ class ChatAgentTest {
         }
     }
 
+    /**
+     * 工具场景假模型：当本轮携带工具规格且已执行工具轮数未达 {@code toolCallRounds} 时返回 tool call，
+     * 否则返回最终文本。由此可验证"有界工具轮次"语义。
+     */
+    static final class ToolScriptedModel implements ChatModel, StreamingChatModel {
+
+        final List<ChatRequest> requests = new CopyOnWriteArrayList<>();
+        private final String toolName;
+        private final int toolCallRounds;
+
+        ToolScriptedModel(String toolName, int toolCallRounds) {
+            this.toolName = toolName;
+            this.toolCallRounds = toolCallRounds;
+        }
+
+        @Override
+        public java.util.Set<dev.langchain4j.model.chat.Capability> supportedCapabilities() {
+            return java.util.Set.of();
+        }
+
+        @Override
+        public dev.langchain4j.model.chat.request.ChatRequestParameters defaultRequestParameters() {
+            return ChatModel.super.defaultRequestParameters();
+        }
+
+        @Override
+        public java.util.List<dev.langchain4j.model.chat.listener.ChatModelListener> listeners() {
+            return ChatModel.super.listeners();
+        }
+
+        @Override
+        public dev.langchain4j.model.ModelProvider provider() {
+            return ChatModel.super.provider();
+        }
+
+        private AiMessage reply(ChatRequest request) {
+            boolean hasToolSpec = request.toolSpecifications() != null
+                    && !request.toolSpecifications().isEmpty();
+            long toolResults = request.messages().stream()
+                    .filter(m -> m instanceof ToolExecutionResultMessage).count();
+            if (hasToolSpec && toolResults < toolCallRounds) {
+                return AiMessage.builder()
+                        .toolExecutionRequests(List.of(ToolExecutionRequest.builder()
+                                .id("tc-" + toolResults)
+                                .name(toolName)
+                                .arguments("{\"q\":\"第" + toolResults + "次\"}")
+                                .build()))
+                        .build();
+            }
+            return AiMessage.from("最终回答-" + toolResults);
+        }
+
+        @Override
+        public ChatResponse doChat(ChatRequest request) {
+            requests.add(request);
+            return ChatResponse.builder().aiMessage(reply(request)).build();
+        }
+
+        @Override
+        public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
+            requests.add(request);
+            AiMessage aiMessage = reply(request);
+            if (!aiMessage.hasToolExecutionRequests()) {
+                String text = aiMessage.text();
+                int mid = text.length() / 2;
+                handler.onPartialResponse(text.substring(0, mid));
+                handler.onPartialResponse(text.substring(mid));
+            }
+            handler.onCompleteResponse(ChatResponse.builder().aiMessage(aiMessage).build());
+        }
+    }
+
+    /** 记录调用参数的测试工具 */
+    static final class RecordingTool {
+
+        final List<String> args = new CopyOnWriteArrayList<>();
+
+        AgentTool asTool(String name) {
+            ToolSpecification spec = ToolSpecification.builder()
+                    .name(name)
+                    .description("测试工具")
+                    .build();
+            ToolExecutor executor = (request, memoryId) -> {
+                args.add(request.arguments());
+                return "tool-result-" + args.size();
+            };
+            return new AgentTool(spec, executor);
+        }
+    }
+
     /** 录制 Hook 事件类型的记录器 */
     static final class RecordingHook implements AgentHook {
-
         final List<String> events = new CopyOnWriteArrayList<>();
 
         @Override
@@ -242,5 +337,144 @@ class ChatAgentTest {
     void build_withoutModels_throws() {
         assertThatThrownBy(() -> ChatAgent.builder().build())
                 .isInstanceOf(Exception.class);
+    }
+
+    // ==================== 工具调用（有界轮次） ====================
+
+    @Test
+    void tools_executeOneRoundThenFinalAnswer() {
+        RecordingTool tool = new RecordingTool();
+        // 模型只请求 1 轮工具调用
+        ToolScriptedModel model = new ToolScriptedModel("lookup", 1);
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .build();
+
+        String answer = agent.call("查一下");
+
+        assertThat(answer).isEqualTo("最终回答-1");
+        // 两轮 LLM：工具调用轮 + 最终答案轮
+        assertThat(model.requests).hasSize(2);
+        // 首轮暴露工具规格，最终轮不再暴露（模型必然收敛）
+        assertThat(model.requests.get(0).toolSpecifications()).hasSize(1);
+        assertThat(model.requests.get(1).toolSpecifications()).isEmpty();
+        // 工具真实执行一次，参数透传
+        assertThat(tool.args).containsExactly("{\"q\":\"第0次\"}");
+        // 工具结果已回填进下一轮消息
+        assertThat(model.requests.get(1).messages())
+                .anyMatch(m -> m instanceof ToolExecutionResultMessage);
+    }
+
+    @Test
+    void defaultMaxToolRounds_capsAtOneEvenIfModelKeepsCalling() {
+        RecordingTool tool = new RecordingTool();
+        // 模型在每轮都请求工具调用（只要有工具规格）
+        ToolScriptedModel model = new ToolScriptedModel("lookup", Integer.MAX_VALUE);
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .build();
+
+        String answer = agent.call("查一下");
+
+        assertThat(answer).isEqualTo("最终回答-1");
+        // 默认 maxToolRounds=1 → 上限 2 次 LLM 调用，工具只执行一次
+        assertThat(model.requests).hasSize(2);
+        assertThat(tool.args).hasSize(1);
+        assertThat(model.requests.get(1).toolSpecifications()).isEmpty();
+    }
+
+    @Test
+    void maxToolRounds_allowsChainedToolCalls() {
+        RecordingTool tool = new RecordingTool();
+        ToolScriptedModel model = new ToolScriptedModel("lookup", Integer.MAX_VALUE);
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .maxToolRounds(3)
+                .build();
+
+        String answer = agent.call("链式查一下");
+
+        assertThat(answer).isEqualTo("最终回答-3");
+        // 3 轮工具 + 1 轮最终回答 = 4 次 LLM 调用
+        assertThat(model.requests).hasSize(4);
+        assertThat(tool.args).hasSize(3);
+        assertThat(model.requests.get(3).toolSpecifications()).isEmpty();
+    }
+
+    @Test
+    void maxToolRoundsZero_doesNotExposeTools() {
+        RecordingTool tool = new RecordingTool();
+        ToolScriptedModel model = new ToolScriptedModel("lookup", Integer.MAX_VALUE);
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .maxToolRounds(0)
+                .build();
+
+        String answer = agent.call("查一下");
+
+        assertThat(answer).isEqualTo("最终回答-0");
+        // 工具完全不下发：单轮收敛，工具未执行
+        assertThat(model.requests).hasSize(1);
+        assertThat(model.requests.get(0).toolSpecifications()).isEmpty();
+        assertThat(tool.args).isEmpty();
+    }
+
+    @Test
+    void getTools_returnsConfiguredTools() {
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(new ScriptedModel()))
+                .tools(new RecordingTool().asTool("lookup"), new RecordingTool().asTool("search"))
+                .build();
+
+        assertThat(agent.getTools())
+                .extracting(t -> t.getToolDefinition().name())
+                .containsExactly("lookup", "search");
+        // 默认工具轮次为 1
+        assertThat(agent.getMaxToolRounds()).isEqualTo(1);
+    }
+
+    @Test
+    void tools_streamForResult_emitsToolStartAndToolEnd() {
+        RecordingTool tool = new RecordingTool();
+        ToolScriptedModel model = new ToolScriptedModel("lookup", 1);
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .build();
+
+        List<AgentStreamEvent> events = agent
+                .streamForResult("查一下", RunnableParams.empty())
+                .collectList()
+                .block();
+
+        assertThat(events).isNotNull();
+        assertThat(events).anyMatch(e -> e instanceof AgentStreamEvent.ToolStart t
+                && "lookup".equals(t.toolName()));
+        assertThat(events).anyMatch(e -> e instanceof AgentStreamEvent.ToolEnd t
+                && "lookup".equals(t.toolName()));
+        assertThat(events.get(events.size() - 1)).isInstanceOf(AgentStreamEvent.Complete.class);
+    }
+
+    @Test
+    void tools_persistToolMessagesInSession() {
+        RecordingTool tool = new RecordingTool();
+        ToolScriptedModel model = new ToolScriptedModel("lookup", 1);
+        InMemorySessionStore store = new InMemorySessionStore();
+        ChatAgent agent = ChatAgent.builder()
+                .models(AgentModels.of(model))
+                .tools(tool.asTool("lookup"))
+                .sessionMessageStore(store)
+                .build();
+
+        agent.call("查一下", RunnableParams.builder().conversationId("conv_tool").build());
+
+        // 会话中完整保留 工具调用 AiMessage + 工具结果，供后续多轮续聊
+        assertThat(store.allMessages()).anyMatch(m -> m instanceof AiMessage ai
+                && ai.hasToolExecutionRequests());
+        assertThat(store.allMessages()).anyMatch(m -> m instanceof ToolExecutionResultMessage);
     }
 }

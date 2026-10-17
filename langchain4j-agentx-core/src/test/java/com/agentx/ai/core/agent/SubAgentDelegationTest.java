@@ -2,8 +2,10 @@ package com.agentx.ai.core.agent;
 
 import com.agentx.ai.core.chatmodels.AgentModels;
 import com.agentx.ai.core.model.AgentStreamEvent;
+import com.agentx.ai.core.model.AgentTool;
 import com.agentx.ai.core.model.RunnableParams;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -248,8 +250,34 @@ class SubAgentDelegationTest {
     }
 
     @Test
-    void subAgent_withoutName_rejectedAtBuild() {
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ReactAgent.builder()
+    void chatSubAgent_withNestedSubAgentTool_isRejectedByGuard() {
+        RecordingChildModel childModel = new RecordingChildModel("不应该被调用");
+
+        // 违规子代理：注册了 call_inner（嵌套 SubAgent 语义，父引擎才能提供的能力）
+        AgentTool nested = new AgentTool(
+                ToolSpecification.builder().name("call_inner").description("嵌套子代理").build(),
+                (request, memoryId) -> "should-not-run");
+
+        ReactAgent parent = ReactAgent.builder()
+                .models(AgentModels.of(new DelegatingParentModel("call_worker")))
+                .subAgent(() -> ChatAgent.builder()
+                        .name("worker")
+                        .description("通用子代理")
+                        .models(AgentModels.of(childModel))
+                        .tools(nested)
+                        .build())
+                .build();
+
+        String answer = parent.call("干点活",
+                RunnableParams.builder().conversationId("conv_guard").build());
+
+        // 合规校验在委派入口拦下（转成工具错误结果），父 Agent 仍正常收敛，子代理从未被调用
+        assertThat(answer).contains("delegated-ok");
+        assertThat(childModel.requests).isEmpty();
+    }
+
+    @Test
+    void subAgent_withoutName_rejectedAtBuild() {        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ReactAgent.builder()
                         .models(AgentModels.of(new RecordingChildModel("x")))
                         .subAgent(() -> ChatAgent.builder()
                                 .models(AgentModels.of(new RecordingChildModel("y")))

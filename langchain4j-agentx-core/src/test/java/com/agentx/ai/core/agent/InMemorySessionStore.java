@@ -36,6 +36,13 @@ class InMemorySessionStore extends SessionMessageStore {
         return data.values().stream().mapToInt(List::size).sum();
     }
 
+    /** 所有已落库消息（跨 conversationId / stateKey 汇总），用于断言消息类型 */
+    List<ChatMessage> allMessages() {
+        List<ChatMessage> all = new ArrayList<>();
+        data.values().forEach(all::addAll);
+        return all;
+    }
+
     /**
      * JdbcTemplate 构造要求非空 DataSource，此处仅为占位；所有 JDBC 方法均不会被调用。
      */

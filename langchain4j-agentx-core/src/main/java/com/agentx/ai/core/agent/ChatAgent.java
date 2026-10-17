@@ -23,10 +23,16 @@ import javax.sql.DataSource;
 import java.util.List;
 
 /**
- * ChatAgent - 普通单轮对话 Agent。
+ * ChatAgent - 普通对话 Agent（单轮 + 有界工具调用）。
  * <p>
- * 与 {@link ReactAgent}（ReAct 多轮循环）相对：不注册工具、不走 Reasoning + Acting 循环，
- * 一次 LLM 调用直接产出答案。适合问答、客服、翻译、摘要等"输入 - 回复"场景。
+ * 与 {@link ReactAgent}（ReAct 多轮循环）相对：不做 Reasoning + Acting 自主循环，
+ * 至多执行 {@code maxToolRounds} 轮工具调用（默认 1 轮），随后一轮必然产出最终答案，
+ * LLM 调用次数上限为 {@code maxToolRounds + 1}。适合问答、客服、翻译、摘要，
+ * 以及"查一次再回答"这类不需要反复推理的浅层工具场景。
+ * <p>
+ * 工具支持：通过 {@link Builder#tools(AgentTool...)} 注册基础 Function Calling 工具，
+ * 模型调用后由框架执行并回填结果。仅覆盖基础工具调用，不含 HITL 拦截、ToolSearch 延迟工具、
+ * 沙箱隔离与 SubAgent 委派——这些能力请使用 {@link ReactAgent}。
  * <p>
  * 复用与 ReactAgent 相同的基础设施：
  * <ul>
@@ -37,8 +43,8 @@ import java.util.List;
  *   <li>思考模型适配：{@link ThinkingMode#THINK_TAG} / {@link ThinkingMode#REASONING_CONTENT}</li>
  * </ul>
  * <p>
- * 不具备的能力（由 ReAct 引擎提供）：工具调用与 ToolSearch、HITL 中断恢复、
- * 上下文压缩、SubAgent 委派、沙箱隔离、长期记忆。需要这些能力请使用 {@link ReactAgent}。
+ * 不具备的能力（由 ReAct 引擎提供）：HITL 中断恢复、上下文压缩、
+ * SubAgent 委派（作为父 Agent）、沙箱隔离、长期记忆。需要这些能力请使用 {@link ReactAgent}。
  * <p>
  * 2.0 起 AI 层基于 LangChain4j：推荐通过 {@link AgentModels} 一次构造同步 + 流式模型对，
  * 与 {@link ReactAgent} 的模型注入方式保持一致。
@@ -57,6 +63,8 @@ public class ChatAgent implements Agent {
     private final AgentTaskManager taskManager;
     private final SessionMessageStore sessionMessageStore;
     private final ConversationStore conversationStore;
+    private final List<AgentTool> tools;
+    private final int maxToolRounds;
     private boolean enableSession;
     private final List<AgentHook> hooks;
     private final ThinkingMode thinkingMode;
@@ -74,6 +82,8 @@ public class ChatAgent implements Agent {
         this.taskManager = builder.taskManager;
         this.sessionMessageStore = sessionMessageStore;
         this.conversationStore = conversationStore;
+        this.tools = builder.tools != null ? List.copyOf(builder.tools) : List.of();
+        this.maxToolRounds = Math.max(0, builder.maxToolRounds);
         this.enableSession = builder.enableSession;
         this.hooks = builder.hooks;
         this.thinkingMode = builder.thinkingMode;
@@ -100,6 +110,8 @@ public class ChatAgent implements Agent {
                 .enableSession(enableSession)
                 .enableTrace(enableTrace)
                 .traceStore(traceStore)
+                .tools(tools)
+                .maxToolRounds(maxToolRounds)
                 .hooks(hooks)
                 .thinkingMode(thinkingMode)
                 .maxRetries(maxRetries)
@@ -184,11 +196,12 @@ public class ChatAgent implements Agent {
     // ==================== SubAgent 模式 ====================
 
     /**
-     * 普通对话 Agent 不注册工具，能力清单固定为空（SubAgent 校验依赖此约定）。
+     * 返回注册的基础工具清单（SubAgent 校验依赖此约定：作为子代理时不得携带
+     * {@code call_*} / {@code ask_user} 这类需要父引擎能力的工具）。
      */
     @Override
     public List<AgentTool> getTools() {
-        return List.of();
+        return tools;
     }
 
     /**
@@ -223,6 +236,20 @@ public class ChatAgent implements Agent {
         return instructions;
     }
 
+    /**
+     * 已注册的工具清单（只读）。
+     */
+    public List<AgentTool> getToolList() {
+        return tools;
+    }
+
+    /**
+     * 允许的工具执行轮数；0 表示不向 LLM 暴露工具。
+     */
+    public int getMaxToolRounds() {
+        return maxToolRounds;
+    }
+
     public AgentTaskManager getTaskManager() {
         return taskManager;
     }
@@ -246,6 +273,8 @@ public class ChatAgent implements Agent {
         private ThinkingMode thinkingMode = ThinkingMode.DISABLED;
         private int maxRetries = 3;
         private AgentTaskManager taskManager;
+        private List<AgentTool> tools;
+        private int maxToolRounds = 1;
 
         public Builder name(String name) {
             this.name = name;
@@ -374,6 +403,47 @@ public class ChatAgent implements Agent {
          */
         public Builder taskManager(AgentTaskManager taskManager) {
             this.taskManager = taskManager;
+            return this;
+        }
+
+        /**
+         * 注册基础工具（Function Calling）：模型可调用，框架执行后回填结果并继续本轮回答。
+         * <p>
+         * 工具轮次受 {@link #maxToolRounds(int)} 限制，默认只允许 1 轮工具调用。
+         * 不含 HITL 拦截、ToolSearch 与沙箱；需要这些能力请使用 {@link ReactAgent}。
+         *
+         * @param tools 工具列表（可变参数）
+         */
+        public Builder tools(AgentTool... tools) {
+            this.tools = tools != null ? List.of(tools) : List.of();
+            return this;
+        }
+
+        /**
+         * 注册基础工具（Function Calling），语义同 {@link #tools(AgentTool...)}。
+         *
+         * @param tools 工具列表
+         */
+        public Builder tools(List<AgentTool> tools) {
+            this.tools = tools;
+            return this;
+        }
+
+        /**
+         * 允许的工具执行轮数，默认 1。
+         * <p>
+         * 语义：模型可发起至多 N 轮工具调用；用尽后最后一轮不再携带工具规格，
+         * 模型必然产出最终答案。因此单次对话的 LLM 调用次数 ≤ N + 1。
+         * <ul>
+         *   <li>1（默认）：一次工具批次 + 一次最终回答，适合"查一次再回答"</li>
+         *   <li>N &gt; 1：允许链式调用（如先检索再取详情）</li>
+         *   <li>0：完全不向 LLM 暴露工具，等价纯对话</li>
+         * </ul>
+         *
+         * @param maxToolRounds 工具执行轮数（负数按 0 处理）
+         */
+        public Builder maxToolRounds(int maxToolRounds) {
+            this.maxToolRounds = maxToolRounds;
             return this;
         }
 

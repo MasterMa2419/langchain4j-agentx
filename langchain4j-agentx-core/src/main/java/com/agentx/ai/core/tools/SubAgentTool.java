@@ -34,7 +34,7 @@ import java.util.function.Supplier;
  * <ul>
  *   <li>只能使用普通工具，禁止嵌套 SubAgentTool</li>
  *   <li>禁止使用 AskUserTool</li>
- *   <li>ChatAgent 不持有工具，天然满足上述约束</li>
+ *   <li>ChatAgent 作为子代理时不持有 {@code call_*} / {@code ask_user} 工具，天然满足上述约束</li>
  * </ul>
  *
  * @author bigchui
